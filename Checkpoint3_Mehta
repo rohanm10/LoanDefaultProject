@@ -1,0 +1,106 @@
+library(caret)
+library(randomForest)
+
+Train_Data <- read.csv("train_v2.csv", header=TRUE, stringsAsFactors=FALSE)
+
+#remove duplicate columns
+df1 = Train_Data[!duplicated(as.list(Train_Data))]
+
+#remove constant columns
+df2 = df1[,apply(df1, 2, var, na.rm=TRUE) != 0]
+
+#Impute Median
+imputed_data = df2
+for(i in 1:679){
+  imputed_data[is.na(df2[,i]), i] = median(df2[,i], na.rm = TRUE)
+}
+
+#Find Correlations
+hc <- cor(imputed_data)
+hc1 <- findCorrelation(hc,cutoff=0.99)
+hc1 <- sort(hc1)
+#df3 <- imputed_data[,-c(hc1)]       #No longer want to remove them.  will calculate differences in next step
+hc <- hc[-1,-1]
+corr_vars <- colnames(hc)[c(hc1)]
+
+
+####Calculate differences of all correlated variables##########
+imputed_data2 <- imputed_data[,-1]
+diff <- NA
+diff_mat <- rep(NA,nrow(imputed_data))
+for (i in 1:ncol(hc)) {
+  for (j in 1:nrow(hc)) {
+    diff <- NA
+    if (hc[j,i] >= 0.99 & hc[j,i] < 1.00){
+      diff <- imputed_data2[,i] - imputed_data2[,j]
+    } #ends if
+    if (sum(as.numeric(diff),na.rm = TRUE)==0){
+      temp_delete <- rep(NA,nrow(imputed_data2))
+    } else {
+      diff_mat <- data.frame(cbind(diff_mat,diff))
+      colnames(diff_mat)[ncol(diff_mat)] <- paste(colnames(hc)[i],"-",colnames(hc)[j],sep="")
+    }
+  } #ends j
+} #ends i
+diff_mat <- diff_mat[,-1]      #Matrix of Differences between correlated variables
+colnames(diff_mat)[1584] <- "f773.f771"
+
+imputed_data2$default <- ifelse(imputed_data2$loss>0,1,0)
+colnames(imputed_data2)[679]
+
+############Model Fitting#############
+
+
+
+####Random Forest with differences only to find the most important#####
+
+diff.default <- cbind(imputed_data2$default,imputed_data2$loss,diff_mat)  #contains default and differences only (no ID or loss)
+colnames(diff.default)[1] <- "default"
+colnames(diff.default)[2] <- "loss"
+set.seed(998)
+inTraining = createDataPartition(diff.default$loss, p = 0.10, list = F)     #use small subset of data to determine important variables
+training <- diff.default[inTraining,]
+
+set.seed(998)
+rf2 <- randomForest(as.factor(default) ~ .-loss, data=training, importance=TRUE, ntree=50) 
+plot(rf2)
+varImpPlot(rf2)
+#most important variable is f529 - f528.   529 is perfectly correlated with 274 which is the variable from the discussions
+
+
+###Test model with only most important differene
+set.seed(998)
+inTraining = createDataPartition(diff.default$loss, p = 0.70, list = F)
+training <- diff.default[inTraining,]
+testing  <- diff.default[-inTraining,]
+
+set.seed(998)
+rf2 <- randomForest(as.factor(default) ~ f529.f528 - loss, data=training, importance=TRUE, ntree=50) 
+plot(rf2)
+varImpPlot(rf2)
+
+randomforest.pred <- predict(rf2, testing)
+table(randomforest.pred,testing$default)
+#randomforest.pred     0     1
+#                   0 26739  1889
+#                   1  1944  1069
+#88% accuracy with only one variable (f529 - f528)
+
+
+###Random Forest with all original variables and additional difference variable
+all_data <- cbind(imputed_data2,diff.default$f529.f528)
+colnames(all_data)[680] <- "f529.f528"
+
+set.seed(998)
+inTraining = createDataPartition(all_data$loss, p = 0.70, list = F)
+training <- all_data[inTraining,]
+testing  <- all_data[-inTraining,]
+
+
+set.seed(998)
+rf3 <- randomForest(as.factor(default) ~ . - loss, data=all_data, importance=TRUE, ntree=5) 
+plot(rf3)
+varImpPlot(rf3)
+
+randomforest.pred <- predict(rf3, testing)
+table(randomforest.pred,testing$default)
